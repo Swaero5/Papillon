@@ -27,6 +27,7 @@ import { getSubjectEmoji } from "@/utils/subjects/emoji";
 import { useTimetable } from '@/database/useTimetable';
 import { getSubjectName } from '@/utils/subjects/name';
 import { useAccountStore } from '@/stores/account';
+import i18n from '@/utils/i18n';
 
 const EmptyListComponent = memo(() => (
   <Dynamic key={'empty-list:warn'}>
@@ -63,14 +64,23 @@ export default function TabOneScreen() {
 
   const [fetchedWeeks, setFetchedWeeks] = useState<number[]>([])
   const [weekNumber, setWeekNumber] = useState(getWeekNumberFromDate(date));
-  const manager = getManager();
-  const now = new Date();
+
+  let manager;
+  try {
+    manager = getManager();
+  } catch (error) {
+    console.warn('Manager not initialized, iCal events will still work');
+    manager = null;
+  }
+
   const store = useAccountStore.getState()
   const account = store.accounts.find(account => store.lastUsedAccount);
   const services: string[] = account?.services?.map((service: { id: string }) => service.id) ?? [];
   const timetable = useTimetable(refresh, weekNumber).map(day => ({
     ...day,
-    courses: day.courses.filter(course => services.includes(course.createdByAccount))
+    courses: day.courses.filter(course =>
+      services.includes(course.createdByAccount) || course.createdByAccount.startsWith('ical_')
+    )
   })).filter(day => day.courses.length > 0);
   const fetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -233,53 +243,49 @@ export default function TabOneScreen() {
     }
   }, [windowWidth, getDateFromIndex, weekNumber]);
 
-  const DayEventsPage = React.memo(function DayEventsPage({ dayDate, isRefreshing, onRefresh, colors }: {
-    dayDate: Date,
-    isRefreshing: boolean,
-    onRefresh: () => void,
-    colors: { primary: string, background: string },
-    router: Router,
-    t: any
-  }) {
+  const DayEventsPage = React.memo(function DayEventsPage({ dayDate, isRefreshing, onRefresh, colors }: { dayDate: Date, isRefreshing: boolean, onRefresh: () => void, colors: { primary: string, background: string }, router: Router, t: any }) {
     const normalizedDayDate = new Date(dayDate);
     normalizedDayDate.setHours(0, 0, 0, 0);
+
     const rawDayEvents: SharedCourse[] = timetable.find(w => {
       const weekDate = new Date(w.date);
       weekDate.setHours(0, 0, 0, 0);
       return weekDate.getTime() === normalizedDayDate.getTime();
-    })?.courses ?? [];
+    })?.courses ?? []
 
+    // Cache to preserve event object identity by id
     const eventCache = React.useRef<{ [id: string]: any }>({});
 
     // Shallow compare function
-        function shallowEqual(objA: any, objB: any) {
-          if (objA === objB) { return true; }
-          if (!objA || !objB) { return false; }
-          const keysA = Object.keys(objA);
-          const keysB = Object.keys(objB);
-          if (keysA.length !== keysB.length) { return false; }
-          for (const key of keysA) {
-            if (objA[key] !== objB[key]) { return false; }
-          }
-          return true;
-        }
+    function shallowEqual(objA: any, objB: any) {
+      if (objA === objB) { return true; }
+      if (!objA || !objB) { return false; }
+      const keysA = Object.keys(objA);
+      const keysB = Object.keys(objB);
+      if (keysA.length !== keysB.length) { return false; }
+      for (const key of keysA) {
+        if (objA[key] !== objB[key]) { return false; }
+      }
+      return true;
+    }
 
     const dayEvents = useMemo(() => {
       const cache = eventCache.current;
       const next: { [id: string]: any } = {};
-      return (rawDayEvents ?? []).map(ev => {
+      const result = (rawDayEvents ?? []).map(ev => {
         if (cache[ev.id] && shallowEqual(ev, cache[ev.id])) {
           next[ev.id] = cache[ev.id];
           return cache[ev.id];
         }
         next[ev.id] = ev;
         return ev;
+
       });
-        eventCache.current = next;
-        return result;
+      eventCache.current = next;
+      return result;
     }, [rawDayEvents]);
 
-const threshold = 30;
+    const threshold = 30;
 
     for (const day of timetable) {
       for (const course of day.courses) {
@@ -299,10 +305,10 @@ const threshold = 30;
           const next = dayEvents[i + 1];
           if (current.to && next.from) {
             const diffMinutes = (next.from.getTime() - current.to.getTime()) / (1000 * 60);
-            if (diffMinutes > 30) {
+            if (diffMinutes > threshold) {
               separated.push({
                 id: `separator-${current.id}-${next.id}`,
-                type: "separator",
+                type: "separator" as any,
                 from: new Date(current.to),
                 to: new Date(next.from),
               });
@@ -313,19 +319,20 @@ const threshold = 30;
       return separated;
     }, [dayEvents]);
 
-    const isCoursePast = (course: SharedCourse) => {
-      if (!course.to) return false;
-      return course.to < new Date();
-    };
-
     return (
       <View style={{ width: Dimensions.get("window").width, flex: 1 }} key={"day-events-" + dayDate.toISOString()}>
         <FlatList
           data={separatedDayEvents}
           style={styles.container}
           showsVerticalScrollIndicator={false}
-          contentInsetAdjustmentBehavior="always"
-          contentContainerStyle={{ paddingHorizontal: 12, paddingVertical: 12, gap: 4 }}
+          contentInsetAdjustmentBehavior={"always"}
+          contentContainerStyle={
+            {
+              paddingHorizontal: 12,
+              paddingVertical: 12,
+              gap: 4,
+            }
+          }
           refreshControl={
             <RefreshControl
               refreshing={isRefreshing}
@@ -336,8 +343,8 @@ const threshold = 30;
           }
           keyExtractor={(item) => item.id}
           ListEmptyComponent={<EmptyListComponent />}
-          renderItem={({ item }) => {
-            if (item.type === 'separator') {
+          renderItem={({ item }: { item: SharedCourse }) => {
+            if ((item as any).type === 'separator') {
               return (
                 <Course
                   id={item.id}
@@ -346,27 +353,8 @@ const threshold = 30;
                   start={Math.floor(item.from.getTime() / 1000)}
                   end={Math.floor(item.to.getTime() / 1000)}
                   showTimes={false}
-                />
-              );
-            } else {
-              const isPast = isCoursePast(item);
-              return (
-                <View style={isPast ? { opacity: 1 } : {}}>
-                  <Course
-                    id={item.id}
-                    name={getSubjectName(item.subject)}
-                    teacher={item.teacher}
-                    room={item.room}
-                    color={isPast ? '#cccccc' : (getSubjectColor(item.subject) || Colors[0])}
-                    status={{
-                      label: item.customStatus ? item.customStatus : getStatusText(item.status),
-                      canceled: item.status === CourseStatus.CANCELED
-                    }}
-                    variant="primary"
-                    start={Math.floor(item.from.getTime() / 1000)}
-                    end={Math.floor(item.to.getTime() / 1000)}
-                    readonly={!!item.createdByAccount}
-                    onPress={() => navigation.navigate('(modals)/course', {
+                  onPress={() => {
+                    navigation.navigate('(modals)/course', {
                       course: item,
                       subjectInfo: {
                         id: item.subjectId,
@@ -374,21 +362,49 @@ const threshold = 30;
                         color: getSubjectColor(item.subject) || Colors[0],
                         emoji: getSubjectEmoji(item.subject),
                       }
-                    })}
-                  />
-                </View>
+                    });
+                  }}
+                />
               );
             }
-          }}
+
+            return (
+              <Course
+                id={item.id}
+                name={getSubjectName(item.subject)}
+                teacher={item.teacher}
+                room={item.room}
+                color={getSubjectColor(item.subject) || Colors[0]}
+                status={{ label: item.customStatus ? item.customStatus : getStatusText(item.status), canceled: (item.status === CourseStatus.CANCELED) }}
+                variant="primary"
+                start={Math.floor(item.from.getTime() / 1000)}
+                end={Math.floor(item.to.getTime() / 1000)}
+                readonly={!!item.createdByAccount}
+                onPress={() => {
+                  navigation.navigate('(modals)/course', {
+                    course: item,
+                    subjectInfo: {
+                      id: item.subjectId,
+                      name: getSubjectName(item.subject),
+                      color: getSubjectColor(item.subject) || Colors[0],
+                      emoji: getSubjectEmoji(item.subject),
+                    }
+                  });
+                }}
+              />
+            )
+          }
+          }
         />
       </View>
     );
-  }, (prevProps, nextProps) => (
-    prevProps.dayDate.getTime() === nextProps.dayDate.getTime() &&
-    prevProps.isRefreshing === nextProps.isRefreshing &&
-    prevProps.onRefresh === nextProps.onRefresh
-  ));
-
+  }, (prevProps, nextProps) => {
+    return (
+      prevProps.dayDate.getTime() === nextProps.dayDate.getTime() &&
+      prevProps.isRefreshing === nextProps.isRefreshing &&
+      prevProps.onRefresh === nextProps.onRefresh
+    );
+  });
 
   // Stable renderItem function
   const renderDay = useCallback(({ index }: { index: number }) => {
@@ -427,7 +443,7 @@ const threshold = 30;
         setShowDatePicker={setShowDatePicker}
       />
 
-      {/*
+
       <NativeHeaderSide side="Right">
         <MenuView
           actions={[
@@ -456,7 +472,7 @@ const threshold = 30;
           </NativeHeaderPressable>
         </MenuView>
       </NativeHeaderSide>
-      */}
+
 
       <NativeHeaderTitle key={"header-" + date.toISOString()}>
         <NativeHeaderTopPressable
@@ -466,19 +482,19 @@ const threshold = 30;
           <Dynamic
             style={{ flexDirection: "row", alignItems: "center", gap: 4 }}
           >
-            <Dynamic animated key={date.toLocaleDateString("fr-FR", { weekday: "long" })}>
+            <Dynamic animated key={date.toLocaleDateString(i18n.language, { weekday: "long" })}>
               <Typography variant="navigation">
-                {date.toLocaleDateString("fr-FR", { weekday: "long" })}
+                {date.toLocaleDateString(i18n.language, { weekday: "long" })}
               </Typography>
             </Dynamic>
             <Dynamic animated>
               <NativeHeaderHighlight color="#D6502B" style={{ marginBottom: 0 }}>
-                {date.toLocaleDateString("fr-FR", { day: "numeric" })}
+                {date.toLocaleDateString(i18n.language, { day: "numeric" })}
               </NativeHeaderHighlight>
             </Dynamic>
-            <Dynamic animated key={date.toLocaleDateString("fr-FR", { month: "long" })}>
+            <Dynamic animated key={date.toLocaleDateString(i18n.language, { month: "long" })}>
               <Typography variant="navigation">
-                {date.toLocaleDateString("fr-FR", { month: "long" })}
+                {date.toLocaleDateString(i18n.language, { month: "long" })}
               </Typography>
             </Dynamic>
           </Dynamic>
